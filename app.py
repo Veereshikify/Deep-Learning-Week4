@@ -1,80 +1,58 @@
-import os
 import gradio as gr
-import torch
-import torch.nn as nn
-import torchvision.transforms as transforms
+import onnxruntime as ort
+import numpy as np
+from PIL import Image
 
-class BaselineCNN(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(3, 16, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Conv2d(16, 32, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Conv2d(32, 64, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2)
-        )
-        self.classifier = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(64 * 16 * 16, 128),
-            nn.ReLU(),
-            nn.Linear(128, 5)
-        )
+session = ort.InferenceSession(
+    "baseline_cnn.onnx",
+    providers=["CPUExecutionProvider"]
+)
 
-    def forward(self, x):
-        return self.classifier(self.features(x))
+class_names = ["cardboard", "glass", "metal", "paper", "plastic"]
 
-CLASS_NAMES = ["cardboard", "glass", "metal", "paper", "plastic"]
-DEVICE = torch.device("cpu")
-
-model = BaselineCNN().to(DEVICE)
-model.load_state_dict(torch.load("baseline_cnn.pth", map_location=DEVICE))
-model.eval()
-
-transform = transforms.Compose([
-    transforms.Resize((128, 128)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-])
-
-DESCRIPTIONS = {
-    "cardboard": "Paper-based packaging material. Recycle as cardboard.",
-    "glass": "Glass material. Recycle as glass.",
-    "metal": "Metal material. Recycle as metal.",
-    "paper": "Paper material. Recycle as paper.",
-    "plastic": "Plastic material. Recycle as plastic."
+recycling_tips = {
+    "cardboard": "Keep cardboard clean and dry. Flatten it before recycling.",
+    "glass": "Rinse glass containers and recycle them separately.",
+    "metal": "Clean metal cans and place them in metal recycling.",
+    "paper": "Keep paper dry and separate from contaminated materials.",
+    "plastic": "Clean plastic containers and check local recycling rules."
 }
 
-def predict_waste(image):
-    """Classify an uploaded waste image and return category, confidence, recycling guidance, and warning."""
+def predict(image):
     if image is None:
-        return "No image", "0.00%", "Please upload an image.", "Waiting for an image."
-    image = image.convert("RGB")
-    tensor = transform(image).unsqueeze(0).to(DEVICE)
-    with torch.no_grad():
-        probabilities = torch.softmax(model(tensor), dim=1)[0]
-    index = int(probabilities.argmax().item())
-    category = CLASS_NAMES[index]
-    confidence = float(probabilities[index].item() * 100)
-    warning = (
-        "Low confidence — please verify the material manually."
-        if confidence < 50
-        else "Prediction generated. Please check the result before recycling."
-    )
-    return category.capitalize(), f"{confidence:.2f}%", DESCRIPTIONS[category], warning
+        return "Please upload an image.", ""
+
+    image = image.convert("RGB").resize((128, 128))
+    arr = np.asarray(image, dtype=np.float32) / 255.0
+    arr = (arr - 0.5) / 0.5
+    arr = np.transpose(arr, (2, 0, 1))
+    arr = np.expand_dims(arr, axis=0)
+
+    logits = session.run(["output"], {"input": arr})[0][0]
+    exp = np.exp(logits - np.max(logits))
+    probabilities = exp / np.sum(exp)
+
+    index = int(np.argmax(probabilities))
+    category = class_names[index]
+    confidence = float(probabilities[index]) * 100
+
+    result = f"Predicted Category: {category.title()}\nConfidence: {confidence:.2f}%"
+
+    if confidence < 50:
+        result += "\n⚠️ Low confidence. Please try a clearer image of the waste item."
+
+    return result, recycling_tips[category]
 
 demo = gr.Interface(
-    fn=predict_waste,
-    inputs=gr.Image(type="pil", label="Upload Waste Image"),
+    fn=predict,
+    inputs=gr.Image(type="pil", label="Upload a waste image"),
     outputs=[
-        gr.Textbox(label="Predicted Waste Category"),
-        gr.Textbox(label="Confidence Score"),
-        gr.Textbox(label="Recycling Information"),
-        gr.Textbox(label="Prediction Warning")
+        gr.Textbox(label="Prediction"),
+        gr.Textbox(label="Recycling Guidance")
     ],
-    title="♻️ Smart Waste Classification System",
-    description="Upload an image to classify cardboard, glass, metal, paper, or plastic. Confidence is a model score, not a guarantee.",
-    theme=gr.themes.Soft()
+    title="AI Waste Image Classification System",
+    description="Upload an image to classify it into cardboard, glass, metal, paper, or plastic."
 )
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "10000"))
-    demo.launch(server_name="0.0.0.0", server_port=port)
+    demo.launch()

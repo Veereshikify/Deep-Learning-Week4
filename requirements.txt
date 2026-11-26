@@ -1,4 +1,4 @@
-torch
-torchvision
 gradio
+onnxruntime
+numpy
 pillow
